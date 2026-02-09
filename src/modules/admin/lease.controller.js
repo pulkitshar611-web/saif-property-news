@@ -653,13 +653,11 @@ exports.createLease = catchAsync(async (req, res, next) => {
                 data: { status: 'Occupied' }
             });
 
-            // Update unit rental mode to BEDROOM_WISE (if not already set by a company lease)
-            if (unit.rentalMode !== 'FULL_UNIT') {
-                await tx.unit.update({
-                    where: { id: uId },
-                    data: { rentalMode: 'BEDROOM_WISE' }
-                });
-            }
+            // Ensure unit is in BEDROOM_WISE mode when a bedroom lease is created
+            await tx.unit.update({
+                where: { id: uId },
+                data: { rentalMode: 'BEDROOM_WISE' }
+            });
 
             // Check if all bedrooms are now occupied BY INDIVIDUAL RESIDENT LEASES if it's a company-leased unit
             const updatedUnit = await tx.unit.findUnique({
