@@ -25,6 +25,7 @@ const allowedOrigins = [
   "https://masteko-property-kti.netlify.app",
   "https://property-new.netlify.app",
   "https://property-n.kiaantechnology.com",
+  "https://www.property-n.kiaantechnology.com",
   "https://property-mastekocomplete.netlify.app"
 ];
 
