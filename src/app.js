@@ -53,6 +53,7 @@ app.use(
 );
 // Configure this properly for production later
 app.use(express.json());
+app.use(express.urlencoded({ extended: true }));
 app.use(morgan('dev'));
 
 // File Upload Middleware
