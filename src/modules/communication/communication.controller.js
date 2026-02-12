@@ -40,7 +40,7 @@ exports.sendMessage = async (req, res) => {
 
         // Send SMS if receiver has a phone number
         if (receiver.phone) {
-            const smsMessage = `${sender.name || 'Admin'}: ${content}`;
+            const smsMessage = content;
             const smsResult = await smsService.sendSMS(receiver.phone, smsMessage);
 
             if (smsResult.success) {
