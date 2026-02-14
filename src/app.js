@@ -26,7 +26,11 @@ const allowedOrigins = [
   "https://property-new.netlify.app",
   "https://property-n.kiaantechnology.com",
   "https://www.property-n.kiaantechnology.com",
-  "https://property-mastekocomplete.netlify.app"
+   "https://ww",
+  "https://property-mastekocomplete.netlify.app",
+  "http://masteko-pm.ca",
+  "https://masteko-pm.ca"
+
 ];
 
 app.use(
