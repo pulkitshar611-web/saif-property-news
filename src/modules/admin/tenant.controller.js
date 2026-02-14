@@ -5,6 +5,8 @@ const smsService = require('../../services/sms.service');
 const emailService = require('../../services/email.service');
 const AppError = require('../../utils/AppError');
 const catchAsync = require('../../utils/catchAsync');
+const allowedOrigins = require('../../config/allowedOrigins');
+
 
 // GET /api/admin/tenants
 exports.getAllTenants = async (req, res) => {
@@ -797,7 +799,9 @@ exports.sendInvite = catchAsync(async (req, res, next) => {
         }
     });
 
-    const loginUrl = process.env.FRONTEND_URL || 'https://property-n.kiaantechnology.com';
+    const requestOrigin = req.get('origin');
+    const loginUrl = (requestOrigin && allowedOrigins.includes(requestOrigin) ? requestOrigin : process.env.FRONTEND_URL) || allowedOrigins[4];
+
     const inviteLink = `${loginUrl}/tenant/invite/${inviteToken}`;
 
     let welcomeMsg = `Welcome to Property Management! \n\nYour login credentials for the portal: \nEmail: ${updatedUser.email}`;

@@ -6,6 +6,8 @@ const emailService = require('../../services/email.service');
 const { generateLeasePDF } = require('../../utils/pdf.utils');
 const AppError = require('../../utils/AppError');
 const catchAsync = require('../../utils/catchAsync');
+const allowedOrigins = require('../../config/allowedOrigins');
+
 
 // GET /api/admin/leases/:id/download
 exports.downloadLeasePDF = async (req, res) => {
@@ -442,7 +444,7 @@ exports.activateLease = catchAsync(async (req, res, next) => {
     });
 
     // 5. Automatic Invite for Activation
-    const notificationResult = await processOnboardingInvitations(lease.tenantId);
+    const notificationResult = await processOnboardingInvitations(lease.tenantId, [], ['email', 'sms'], req.get('origin'));
 
     res.json({
         success: true,
@@ -818,7 +820,7 @@ exports.createLease = catchAsync(async (req, res, next) => {
     let notificationResult = { status: 'Skipped', message: 'Credentials not sent by user request.' };
 
     if (sendCredentials) {
-        notificationResult = await processOnboardingInvitations(tId, coTenantIds);
+        notificationResult = await processOnboardingInvitations(tId, coTenantIds, ['email', 'sms'], req.get('origin'));
     }
 
     res.status(201).json({
@@ -829,7 +831,7 @@ exports.createLease = catchAsync(async (req, res, next) => {
 });
 
 // Helper function to handle automatic onboarding invitations for primary and co-tenants
-const processOnboardingInvitations = async (tenantId, coTenantIds = [], methods = ['email', 'sms']) => {
+const processOnboardingInvitations = async (tenantId, coTenantIds = [], methods = ['email', 'sms'], requestOrigin = null) => {
     try {
         const tenantIds = [tenantId, ...coTenantIds].filter(Boolean);
         if (tenantIds.length === 0) return { status: 'Skipped', message: 'No tenants to invite' };
@@ -848,7 +850,7 @@ const processOnboardingInvitations = async (tenantId, coTenantIds = [], methods 
             details: []
         };
 
-        const loginUrl = process.env.FRONTEND_URL || 'https://property-n.kiaantechnology.com';
+        const loginUrl = (requestOrigin && allowedOrigins.includes(requestOrigin) ? requestOrigin : process.env.FRONTEND_URL) || allowedOrigins[4];
 
         for (const user of users) {
             let password = null;
@@ -981,7 +983,7 @@ exports.sendCredentials = async (req, res) => {
 
         if (!lease) return res.status(404).json({ message: 'Lease not found' });
 
-        const result = await processOnboardingInvitations(lease.tenantId);
+        const result = await processOnboardingInvitations(lease.tenantId, [], ['email', 'sms'], req.get('origin'));
 
         res.json({
             success: true,
