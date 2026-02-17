@@ -21,8 +21,23 @@ exports.downloadInvoicePDF = async (req, res) => {
             // Map internal keys to PDF-expected keys
             if (s.key === 'companyName') settings['company_name'] = s.value;
             else if (s.key === 'companyAddress') settings['company_address'] = s.value;
+            else if (s.key === 'companyPhone') settings['company_phone'] = s.value;
             else settings[s.key] = s.value;
         });
+
+        // Fallback to Admin Profile if settings are empty
+        if (!settings['company_name'] || !settings['company_address'] || !settings['company_phone']) {
+            const adminUser = await prisma.user.findFirst({
+                where: { role: 'ADMIN' },
+                orderBy: { id: 'asc' }
+            });
+
+            if (adminUser) {
+                if (!settings['company_name']) settings['company_name'] = adminUser.companyName || adminUser.name || 'Masteko';
+                if (!settings['company_address']) settings['company_address'] = adminUser.companyDetails || '';
+                if (!settings['company_phone']) settings['company_phone'] = adminUser.phone || '';
+            }
+        }
 
         generateInvoicePDF(invoice, res, settings);
     } catch (e) {
@@ -170,7 +185,7 @@ exports.createInvoice = async (req, res) => {
                 amount: totalAmount,
                 paidAmount: 0,
                 balanceDue: totalAmount,
-                status: 'draft',
+                status: req.body.status || 'draft',
                 category: req.body.category || 'RENT',
                 description: req.body.description || null,
                 dueDate: new Date(Date.now() + 5 * 24 * 60 * 60 * 1000)

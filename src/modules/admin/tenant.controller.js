@@ -71,6 +71,24 @@ exports.getAllTenants = async (req, res) => {
 
         const sortedTenants = [...tenants].sort((a, b) => b.id - a.id);
 
+        // Fetch communication logs for credential invitations to identify who has already been invited
+        const tenantEmails = sortedTenants.map(t => t.email).filter(Boolean);
+        const tenantPhones = sortedTenants.map(t => t.phone).filter(Boolean);
+
+        const inviteLogs = await prisma.communicationLog.findMany({
+            where: {
+                OR: [
+                    { recipient: { in: tenantEmails } },
+                    { recipient: { in: tenantPhones } }
+                ],
+                eventType: 'TENANT_CREATION_CREDENTIALS',
+                status: 'Sent'
+            },
+            select: { recipient: true }
+        });
+
+        const invitedRecipients = new Set(inviteLogs.map(log => log.recipient));
+
         // Fetch all units and properties into a map for fast lookup of resident assignments
         const units = await prisma.unit.findMany({ include: { property: true } });
         const unitMap = new Map(units.map(u => [u.id, u]));
@@ -123,13 +141,17 @@ exports.getAllTenants = async (req, res) => {
                 property: propName,
                 unit: uName,
                 leaseStatus: lStatus,
+                leaseStartDate: activeLease?.startDate || null,
+                leaseEndDate: activeLease?.endDate || null,
                 activeLeaseRole: activeLease ? (t.leases.find(l => l.id === activeLease.id) ? 'TENANT' : 'RESIDENT') : null,
                 rentAmount: activeLease?.monthlyRent || 0,
                 insurance: t.insurances,
                 documents: t.documents,
                 parentId: t.parentId,
                 parentName: t.parent ? t.parent.name || `${t.parent.firstName || ''} ${t.parent.lastName || ''}`.trim() : null,
-                hasPortalAccess: !!t.password
+                hasPortalAccess: !!t.password,
+                companyContacts: t.companyContacts,
+                isInviteSent: (t.email && invitedRecipients.has(t.email)) || (t.phone && invitedRecipients.has(t.phone))
             };
         });
 

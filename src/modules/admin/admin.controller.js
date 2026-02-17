@@ -592,6 +592,24 @@ exports.getOwners = async (req, res) => {
             }
         });
 
+        // Check communication logs for owners to see if they've been invited
+        const ownerEmails = owners.map(o => o.email).filter(Boolean);
+        const ownerPhones = owners.map(o => o.phone).filter(Boolean);
+
+        const inviteLogs = await prisma.communicationLog.findMany({
+            where: {
+                OR: [
+                    { recipient: { in: ownerEmails } },
+                    { recipient: { in: ownerPhones } }
+                ],
+                eventType: 'TENANT_CREATION_CREDENTIALS',
+                status: 'Sent'
+            },
+            select: { recipient: true }
+        });
+
+        const invitedRecipients = new Set(inviteLogs.map(log => log.recipient));
+
         const formatted = owners.map(o => {
             // Units from directly owned properties
             const directUnits = o.properties.reduce((acc, p) => acc + p.units.length, 0);
@@ -607,7 +625,8 @@ exports.getOwners = async (req, res) => {
                 isPrimaryContact: o.company?.primaryContactId === o.id,
                 properties: propertyNames,
                 totalUnits: directUnits,
-                status: 'Active'
+                status: 'Active',
+                isInviteSent: (o.email && invitedRecipients.has(o.email)) || (o.phone && invitedRecipients.has(o.phone))
             };
         });
 

@@ -19,11 +19,7 @@ exports.getSettings = async (req, res) => {
             });
 
             if (qbConfig) {
-                // Overlay QBO settings
-                settingsMap['qb_connected'] = 'true'; // If record exists, we assume connected or at least configured
-                // Or better check if accessToken exists
                 settingsMap['qb_connected'] = qbConfig.accessToken ? 'true' : 'false';
-
                 settingsMap['qb_autoSync'] = String(qbConfig.autoSync);
                 settingsMap['qb_frequency'] = qbConfig.frequency;
                 settingsMap['qb_account_fullUnitRent'] = qbConfig.accountFullUnitRent || '';
@@ -31,7 +27,6 @@ exports.getSettings = async (req, res) => {
                 settingsMap['qb_account_securityDeposit'] = qbConfig.accountSecurityDeposit || '';
                 settingsMap['qb_account_lateFees'] = qbConfig.accountLateFees || '';
             } else {
-                // Default defaults for new user
                 settingsMap['qb_connected'] = 'false';
                 settingsMap['qb_autoSync'] = 'false';
                 settingsMap['qb_frequency'] = 'realtime';
@@ -39,6 +34,20 @@ exports.getSettings = async (req, res) => {
                 settingsMap['qb_account_bedroomRent'] = '';
                 settingsMap['qb_account_securityDeposit'] = '';
                 settingsMap['qb_account_lateFees'] = '';
+            }
+        }
+
+        // 3. Fallback to Admin Profile if settings are empty
+        if (!settingsMap['companyName'] || !settingsMap['companyAddress'] || !settingsMap['companyPhone']) {
+            const adminUser = await prisma.user.findFirst({
+                where: { role: 'ADMIN' },
+                orderBy: { id: 'asc' }
+            });
+
+            if (adminUser) {
+                if (!settingsMap['companyName']) settingsMap['companyName'] = adminUser.companyName || adminUser.name || 'Masteko';
+                if (!settingsMap['companyAddress']) settingsMap['companyAddress'] = adminUser.companyDetails || '';
+                if (!settingsMap['companyPhone']) settingsMap['companyPhone'] = adminUser.phone || '';
             }
         }
 

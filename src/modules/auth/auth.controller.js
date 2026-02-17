@@ -2,6 +2,9 @@ const { body, validationResult } = require('express-validator');
 const bcrypt = require('bcrypt');
 const prisma = require('../../config/prisma');
 const { generateTokens } = require('../../utils/token');
+const { uploadToCloudinary } = require('../../config/cloudinary');
+const path = require('path');
+const fs = require('fs');
 
 // Login Controller
 exports.login = async (req, res) => {
@@ -137,9 +140,24 @@ exports.getProfile = async (req, res) => {
                 city: true,
                 state: true,
                 country: true,
+                companyName: true,
+                companyDetails: true,
                 createdAt: true
             }
         });
+
+        if (user) {
+            // Find the latest profile picture (USER_AVATAR type)
+            const avatar = await prisma.document.findFirst({
+                where: {
+                    userId: user.id,
+                    type: 'USER_AVATAR'
+                },
+                orderBy: { createdAt: 'desc' }
+            });
+            user.profilePictureUrl = avatar ? avatar.fileUrl : null;
+        }
+
         res.json(user);
     } catch (e) {
         res.status(500).json({ message: 'Server error' });
@@ -158,6 +176,8 @@ exports.updateProfile = async (req, res) => {
         if (city !== undefined) updateData.city = city;
         if (state !== undefined) updateData.state = state;
         if (country !== undefined) updateData.country = country;
+        if (req.body.companyName !== undefined) updateData.companyName = req.body.companyName;
+        if (req.body.companyDetails !== undefined) updateData.companyDetails = req.body.companyDetails;
 
         if (phone) {
             const digits = phone.replace(/\D/g, '');
@@ -188,6 +208,40 @@ exports.updateProfile = async (req, res) => {
             updateData.password = await bcrypt.hash(password, 10);
         }
 
+        // --- PROFILE PICTURE LOGIC ---
+        let profilePictureUrl = null;
+        if (req.files && req.files.profilePicture) {
+            const file = req.files.profilePicture;
+            let fileUrl = '';
+
+            try {
+                if (file.tempFilePath) {
+                    const result = await uploadToCloudinary(file.tempFilePath, 'user_avatars');
+                    fileUrl = result.secure_url;
+                } else {
+                    const uploadDir = path.join(process.cwd(), 'uploads', 'avatars');
+                    if (!fs.existsSync(uploadDir)) fs.mkdirSync(uploadDir, { recursive: true });
+                    const fileName = `${Date.now()}-${file.name}`;
+                    const uploadPath = path.join(uploadDir, fileName);
+                    await file.mv(uploadPath);
+                    fileUrl = `/uploads/avatars/${fileName}`;
+                }
+
+                // Create a record in the Document table
+                await prisma.document.create({
+                    data: {
+                        userId: userId,
+                        name: 'Profile Picture',
+                        type: 'USER_AVATAR',
+                        fileUrl: fileUrl
+                    }
+                });
+                profilePictureUrl = fileUrl;
+            } catch (err) {
+                console.error('Error uploading profile picture:', err);
+            }
+        }
+
         const updatedUser = await prisma.user.update({
             where: { id: userId },
             data: updateData,
@@ -201,13 +255,21 @@ exports.updateProfile = async (req, res) => {
                 lastName: true,
                 city: true,
                 state: true,
-                country: true
+                country: true,
+                companyName: true,
+                companyDetails: true
             }
         });
 
         res.json({
             message: 'Profile updated successfully',
-            user: updatedUser
+            user: {
+                ...updatedUser,
+                profilePictureUrl: profilePictureUrl || (await prisma.document.findFirst({
+                    where: { userId: userId, type: 'USER_AVATAR' },
+                    orderBy: { createdAt: 'desc' }
+                }))?.fileUrl || null
+            }
         });
     } catch (e) {
         console.error('Update Profile Error:', e);

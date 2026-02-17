@@ -371,36 +371,61 @@ exports.activateLease = catchAsync(async (req, res, next) => {
             });
         }
 
-        // 3. Auto-create Invoice for the current month
-        const monthStr = startDate.toLocaleString('default', { month: 'long', year: 'numeric' });
-        const existingInvoice = await tx.invoice.findFirst({
-            where: {
-                tenantId: tId,
-                unitId: uId,
-                month: monthStr
-            }
-        });
+        // 3. Auto-create Invoices (Pro-rata + Past Months)
+        const start = new Date(lease.startDate || new Date());
+        const monthStr = start.toLocaleString('default', { month: 'long', year: 'numeric' });
+        const today = new Date();
+        const currentMonthStart = new Date(today.getFullYear(), today.getMonth(), 1);
 
-        if (!existingInvoice) {
-            const count = await tx.invoice.count();
-            const invoiceNo = `INV-LEASE-${String(count + 1).padStart(5, '0')}`;
-            const rentAmt = parseFloat(updatedLease.monthlyRent) || 0;
+        let iterDate = new Date(start.getFullYear(), start.getMonth(), 1);
 
-            await tx.invoice.create({
-                data: {
-                    invoiceNo,
+        while (iterDate <= currentMonthStart) {
+            const currentIterMonthStr = iterDate.toLocaleString('default', { month: 'long', year: 'numeric' });
+
+            const existingInvoice = await tx.invoice.findFirst({
+                where: {
                     tenantId: tId,
                     unitId: uId,
-                    leaseId: updatedLease.id,
-                    leaseType: updatedLease.unit.rentalMode,
-                    month: monthStr,
-                    rent: rentAmt,
-                    amount: rentAmt,
-                    balanceDue: rentAmt,
-                    status: 'sent',
-                    dueDate: new Date(startDate.getTime() + 5 * 24 * 60 * 60 * 1000)
+                    month: currentIterMonthStr,
+                    category: 'RENT'
                 }
             });
+
+            if (!existingInvoice) {
+                const count = await tx.invoice.count();
+                const invoiceNo = `INV-LEASE-${String(count + 1).padStart(5, '0')}`;
+
+                let rentAmt = parseFloat(updatedLease.monthlyRent) || 0;
+
+                // Pro-rata logic for the first month
+                if (iterDate.getMonth() === start.getMonth() && iterDate.getFullYear() === start.getFullYear()) {
+                    const totalDays = new Date(start.getFullYear(), start.getMonth() + 1, 0).getDate();
+                    const remainingDays = totalDays - start.getDate() + 1;
+                    if (remainingDays < totalDays) {
+                        rentAmt = (rentAmt / totalDays) * remainingDays;
+                        rentAmt = parseFloat(rentAmt.toFixed(2));
+                    }
+                }
+
+                await tx.invoice.create({
+                    data: {
+                        invoiceNo,
+                        tenantId: tId,
+                        unitId: uId,
+                        leaseId: updatedLease.id,
+                        leaseType: updatedLease.unit.rentalMode,
+                        month: currentIterMonthStr,
+                        rent: rentAmt,
+                        serviceFees: 0,
+                        amount: rentAmt,
+                        paidAmount: 0,
+                        balanceDue: rentAmt,
+                        status: 'sent',
+                        dueDate: iterDate > start ? iterDate : start
+                    }
+                });
+            }
+            iterDate.setMonth(iterDate.getMonth() + 1);
         }
 
         // --- DEPOSIT INVOICE LOGIC ---
@@ -443,8 +468,13 @@ exports.activateLease = catchAsync(async (req, res, next) => {
         return updatedLease;
     });
 
-    // 5. Automatic Invite for Activation
-    const notificationResult = await processOnboardingInvitations(lease.tenantId, [], ['email', 'sms'], req.get('origin'));
+    // 5. Automatic Invite for Activation - Defaults to FALSE (User must send manually)
+    const sendNow = req.body.sendCredentials === true;
+    let notificationResult = { status: 'Skipped', message: 'Credentials not sent automatically.' };
+
+    if (sendNow) {
+        notificationResult = await processOnboardingInvitations(lease.tenantId, [], ['email', 'sms'], req.get('origin'));
+    }
 
     res.json({
         success: true,
@@ -713,42 +743,62 @@ exports.createLease = catchAsync(async (req, res, next) => {
             });
         }
 
-        // Auto-create Invoice for the first month
-        const monthStr = new Date(startDate).toLocaleString('default', { month: 'long', year: 'numeric' });
+        // 3. Auto-create Invoices (Pro-rata + Past Months)
+        const start = new Date(startDate);
+        const monthStr = start.toLocaleString('default', { month: 'long', year: 'numeric' });
+        const today = new Date();
+        const currentMonthStart = new Date(today.getFullYear(), today.getMonth(), 1);
 
-        // Determine who to bill: If tenant is a RESIDENT, bill their Parent
+        let iterDate = new Date(start.getFullYear(), start.getMonth(), 1);
         const billableTenantId = targetTenant.type === 'RESIDENT' ? targetTenant.parentId : tId;
 
-        const existingInvoice = await tx.invoice.findFirst({
-            where: {
-                tenantId: billableTenantId,
-                unitId: uId,
-                month: monthStr
-            }
-        });
+        while (iterDate <= currentMonthStart) {
+            const currentIterMonthStr = iterDate.toLocaleString('default', { month: 'long', year: 'numeric' });
 
-        if (!existingInvoice) {
-            const count = await tx.invoice.count();
-            const invoiceNo = `INV-LEASE-${String(count + 1).padStart(5, '0')}`;
-            const rentAmt = parseFloat(monthlyRent) || 0;
-
-            await tx.invoice.create({
-                data: {
-                    invoiceNo,
+            const existingInvoice = await tx.invoice.findFirst({
+                where: {
                     tenantId: billableTenantId,
                     unitId: uId,
-                    leaseId: lease.id,
-                    leaseType: isFullUnitLease ? 'FULL_UNIT' : 'BEDROOM_WISE',
-                    month: monthStr,
-                    rent: rentAmt,
-                    serviceFees: 0,
-                    amount: rentAmt,
-                    paidAmount: 0,
-                    balanceDue: rentAmt,
-                    status: 'sent',
-                    dueDate: new Date(startDate)
+                    month: currentIterMonthStr,
+                    category: 'RENT'
                 }
             });
+
+            if (!existingInvoice) {
+                const count = await tx.invoice.count();
+                const invoiceNo = `INV-LEASE-${String(count + 1).padStart(5, '0')}`;
+
+                let rentAmt = parseFloat(monthlyRent) || 0;
+
+                // Pro-rata logic for the first month
+                if (iterDate.getMonth() === start.getMonth() && iterDate.getFullYear() === start.getFullYear()) {
+                    const totalDays = new Date(start.getFullYear(), start.getMonth() + 1, 0).getDate();
+                    const remainingDays = totalDays - start.getDate() + 1;
+                    if (remainingDays < totalDays) {
+                        rentAmt = (rentAmt / totalDays) * remainingDays;
+                        rentAmt = parseFloat(rentAmt.toFixed(2));
+                    }
+                }
+
+                await tx.invoice.create({
+                    data: {
+                        invoiceNo,
+                        tenantId: billableTenantId,
+                        unitId: uId,
+                        leaseId: lease.id,
+                        leaseType: isFullUnitLease ? 'FULL_UNIT' : 'BEDROOM_WISE',
+                        month: currentIterMonthStr,
+                        rent: rentAmt,
+                        serviceFees: 0,
+                        amount: rentAmt,
+                        paidAmount: 0,
+                        balanceDue: rentAmt,
+                        status: 'sent',
+                        dueDate: iterDate > start ? iterDate : start
+                    }
+                });
+            }
+            iterDate.setMonth(iterDate.getMonth() + 1);
         }
 
         // --- DEPOSIT INVOICE LOGIC ---
@@ -815,7 +865,7 @@ exports.createLease = catchAsync(async (req, res, next) => {
     // 5. Automatic Onboarding Invitations
     // Check if sendCredentials flag is true (default to true if undefined for backward compatibility, 
     // but the frontend will send it explicitly)
-    const sendCredentials = req.body.sendCredentials !== false;
+    const sendCredentials = req.body.sendCredentials === true;
 
     let notificationResult = { status: 'Skipped', message: 'Credentials not sent by user request.' };
 
