@@ -17,11 +17,12 @@ cloudinary.config({
  * @param {string} folder - Cloudinary folder name
  * @returns {Promise<Object>} - Cloudinary upload response
  */
-const uploadToCloudinary = async (filePath, folder = 'property_management') => {
+const uploadToCloudinary = async (filePath, folder = 'property_management', options = {}) => {
     try {
         const result = await cloudinary.uploader.upload(filePath, {
             folder: folder,
-            resource_type: 'auto'
+            resource_type: options.resource_type || 'auto',
+            ...options
         });
 
         // Delete temporary file

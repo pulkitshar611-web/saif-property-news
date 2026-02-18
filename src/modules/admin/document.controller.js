@@ -22,7 +22,16 @@ exports.getAllDocuments = async (req, res) => {
             orderBy: { createdAt: 'desc' }
         });
 
-        res.json(documents);
+        const token = req.headers.authorization ? req.headers.authorization.split(' ')[1] : '';
+        const formatted = documents.map(doc => ({
+            ...doc,
+            // Force through proxy if it's a remote URL to fix headers/auth
+            fileUrl: doc.fileUrl.startsWith('http')
+                ? `/api/admin/documents/${doc.id}/download?disposition=inline&token=${token}`
+                : doc.fileUrl
+        }));
+
+        res.json(formatted);
     } catch (e) {
         console.error(e);
         res.status(500).json({ message: 'Server error' });
@@ -48,20 +57,45 @@ exports.downloadDocument = async (req, res) => {
         // Handle Cloudinary URLs (Absolute) - Proxy via Axios Stream
         if (doc.fileUrl.startsWith('http')) {
             try {
+                // Ensure no auth headers from our backend are leaked to Cloudinary
                 const response = await axios({
                     method: 'GET',
                     url: doc.fileUrl,
-                    responseType: 'stream'
+                    responseType: 'stream',
+                    headers: {} // Strip any ambient headers
                 });
 
                 const disposition = req.query.disposition || 'inline';
-                res.setHeader('Content-Type', response.headers['content-type'] || 'application/pdf');
-                res.setHeader('Content-Disposition', `${disposition}; filename="${fileName}"`);
+
+                // Set correct headers for the browser
+                if (disposition === 'inline') {
+                    // For inline (previews), simple 'inline' prevents forcing a download
+                    res.setHeader('Content-Disposition', 'inline');
+                } else {
+                    res.setHeader('Content-Disposition', `attachment; filename="${fileName}"`);
+                }
+
+                // Determine content type more robustly
+                let contentType = response.headers['content-type'];
+                const ext = (doc.name || fileName || '').toLowerCase();
+                const urlLower = doc.fileUrl.toLowerCase();
+
+                if (!contentType || contentType === 'application/octet-stream' || contentType.includes('image/')) {
+                    if (urlLower.endsWith('.pdf') || ext.endsWith('.pdf')) {
+                        contentType = 'application/pdf';
+                    } else if (urlLower.endsWith('.jpg') || urlLower.endsWith('.jpeg') || ext.endsWith('.jpg') || ext.endsWith('.jpeg')) {
+                        contentType = 'image/jpeg';
+                    } else if (urlLower.endsWith('.png') || ext.endsWith('.png')) {
+                        contentType = 'image/png';
+                    }
+                }
+
+                res.setHeader('Content-Type', contentType || 'application/pdf');
 
                 response.data.pipe(res);
                 return;
             } catch (proxyErr) {
-                console.error('Cloudinary Proxy error:', proxyErr);
+                console.error('Cloudinary Proxy error:', proxyErr.message);
                 return res.status(500).json({ message: 'Error streaming file from storage' });
             }
         }
@@ -110,7 +144,10 @@ exports.uploadDocument = async (req, res) => {
         // Upload to Cloudinary instead of local disk
         let fileUrl = '';
         if (file.tempFilePath) {
-            const result = await uploadToCloudinary(file.tempFilePath, 'admin_documents');
+            const isPdf = file.name.toLowerCase().endsWith('.pdf');
+            const result = await uploadToCloudinary(file.tempFilePath, 'admin_documents', {
+                resource_type: isPdf ? 'raw' : 'auto'
+            });
             fileUrl = result.secure_url;
         } else {
             // Fallback for environments where tempFilePath isn't available
