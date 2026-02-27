@@ -178,6 +178,77 @@ async function main() {
     console.log("✅ Sample tenant created");
   }
 
+  // 5. Create Mock Invoices for the Revenue Dashboard (To split Rent vs Deposit vs Fees)
+  const firstUnit = await prisma.unit.findFirst();
+  if (firstUnit && tenant) {
+    const existingInvoices = await prisma.invoice.count({ where: { tenantId: tenant.id } });
+    if (existingInvoices === 0) {
+      console.log("📦 Creating mock paid invoices to feed Revenue Dashboard...");
+
+      const currentMonth = new Date().toISOString().slice(0, 7); // e.g., '2026-02'
+
+      await prisma.invoice.createMany({
+        data: [
+          // 1. A Rent Invoice
+          {
+            invoiceNo: `INV-MOCK-RENT-${Date.now()}`,
+            tenantId: tenant.id,
+            unitId: firstUnit.id,
+            month: currentMonth,
+            amount: 1500,
+            rent: 1500,
+            serviceFees: 0,
+            status: "paid",
+            paidAt: new Date(),
+            dueDate: new Date(),
+            paymentMethod: "Bank Transfer",
+            balanceDue: 0,
+            paidAmount: 1500,
+            category: "RENT",
+            description: "Monthly Rent Payment"
+          },
+          // 2. A Deposit Invoice
+          {
+            invoiceNo: `INV-MOCK-DEP-${Date.now()}`,
+            tenantId: tenant.id,
+            unitId: firstUnit.id,
+            month: currentMonth,
+            amount: 750,
+            rent: 0,
+            serviceFees: 750,
+            status: "paid",
+            paidAt: new Date(),
+            dueDate: new Date(),
+            paymentMethod: "Credit Card",
+            balanceDue: 0,
+            paidAmount: 750,
+            category: "SERVICE",
+            description: "Security Deposit"
+          },
+          // 3. A Service Fee Invoice
+          {
+            invoiceNo: `INV-MOCK-FEE-${Date.now()}`,
+            tenantId: tenant.id,
+            unitId: firstUnit.id,
+            month: currentMonth,
+            amount: 125,
+            rent: 0,
+            serviceFees: 125,
+            status: "paid",
+            paidAt: new Date(),
+            dueDate: new Date(),
+            paymentMethod: "E-Transfer",
+            balanceDue: 0,
+            paidAmount: 125,
+            category: "SERVICE",
+            description: "Late Fee Penalty"
+          }
+        ]
+      });
+      console.log("✅ Mock paid invoices created for dashboard testing");
+    }
+  }
+
   console.log("\n🌱 Seed completed successfully!");
   console.log(`📊 Total Buildings: ${BUILDINGS_DATA.length}`);
   console.log(`📊 Total Units: ${BUILDINGS_DATA.length * 8}`);

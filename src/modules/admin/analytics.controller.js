@@ -21,15 +21,6 @@ exports.getRevenueStats = async (req, res) => {
 
         const unitFilter = parsedOwnerId ? { propertyId: { in: propertyIds } } : {};
 
-        // 1. Actual Revenue (Requirement 7): Sum of paidAmount across all invoices
-        const invoiceAgg = await prisma.invoice.aggregate({
-            where: {
-                unit: unitFilter
-            },
-            _sum: { paidAmount: true }
-        });
-        const actualRevenue = parseFloat(invoiceAgg._sum.paidAmount) || 0;
-
         // 2. Projected Revenue (Requirement 7): Sum of monthlyRent across all Active leases
         const leaseAgg = await prisma.lease.aggregate({
             where: {
@@ -40,7 +31,7 @@ exports.getRevenueStats = async (req, res) => {
         });
         const projectedRevenue = parseFloat(leaseAgg._sum.monthlyRent) || 0;
 
-        // 3. Breakdown by Property (Actual Revenue Focused)
+        // Fetch all paid invoices for Actual Revenue and breakdowns
         const invoices = await prisma.invoice.findMany({
             where: {
                 paidAmount: { gt: 0 },
@@ -49,30 +40,67 @@ exports.getRevenueStats = async (req, res) => {
             include: { unit: { include: { property: true } } }
         });
 
+        let actualRevenue = 0;
+        let actualRent = 0;
+        let actualDeposit = 0;
+        let actualServiceFees = 0;
         const propertyMap = {};
+        const monthlyMap = {};
+
         invoices.forEach(inv => {
+            const amount = parseFloat(inv.paidAmount) || 0;
+            actualRevenue += amount;
+
+            let type = 'Rent';
+            if (inv.category === 'SERVICE') {
+                if (inv.description && inv.description.includes('Secondary Deposit') || inv.description?.includes('Security Deposit')) {
+                    type = 'Deposit';
+                    actualDeposit += amount;
+                } else {
+                    type = 'ServiceFees';
+                    actualServiceFees += amount;
+                }
+            } else {
+                actualRent += amount;
+            }
+
+            // Breakdown by Property
             const propName = inv.unit?.property?.name || 'Other Building';
-            if (!propertyMap[propName]) propertyMap[propName] = 0;
-            propertyMap[propName] += parseFloat(inv.paidAmount);
+            if (!propertyMap[propName]) propertyMap[propName] = { amount: 0, rent: 0, deposit: 0, serviceFees: 0 };
+            propertyMap[propName].amount += amount;
+            if (type === 'Rent') propertyMap[propName].rent += amount;
+            else if (type === 'Deposit') propertyMap[propName].deposit += amount;
+            else if (type === 'ServiceFees') propertyMap[propName].serviceFees += amount;
+
+            // Monthly Breakdown
+            if (!monthlyMap[inv.month]) monthlyMap[inv.month] = { amount: 0, rent: 0, deposit: 0, serviceFees: 0 };
+            monthlyMap[inv.month].amount += amount;
+            if (type === 'Rent') monthlyMap[inv.month].rent += amount;
+            else if (type === 'Deposit') monthlyMap[inv.month].deposit += amount;
+            else if (type === 'ServiceFees') monthlyMap[inv.month].serviceFees += amount;
         });
+
         const revenueByProperty = Object.keys(propertyMap).map(p => ({
             name: p,
-            amount: propertyMap[p]
+            amount: propertyMap[p].amount,
+            rent: propertyMap[p].rent,
+            deposit: propertyMap[p].deposit,
+            serviceFees: propertyMap[p].serviceFees
         }));
 
-        // 4. Monthly Breakdown (Actual Revenue Focused)
-        const monthlyMap = {};
-        invoices.forEach(inv => {
-            if (!monthlyMap[inv.month]) monthlyMap[inv.month] = 0;
-            monthlyMap[inv.month] += parseFloat(inv.paidAmount);
-        });
         const monthlyRevenue = Object.keys(monthlyMap).map(m => ({
             month: m,
-            amount: monthlyMap[m]
+            amount: monthlyMap[m].amount,
+            rent: monthlyMap[m].rent,
+            deposit: monthlyMap[m].deposit,
+            serviceFees: monthlyMap[m].serviceFees
         }));
 
         res.json({
             actualRevenue,
+            actualRent,
+            actualDeposit,
+            actualServiceFees,
             projectedRevenue,
             totalRevenue: actualRevenue, // Backward compatibility
             monthlyRevenue,

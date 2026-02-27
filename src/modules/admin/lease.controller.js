@@ -372,14 +372,18 @@ exports.activateLease = catchAsync(async (req, res, next) => {
         }
 
         // 3. Auto-create Invoices (Pro-rata + Past Months)
-        const start = new Date(lease.startDate || new Date());
+        const startRaw = new Date(lease.startDate || new Date());
+        const start = new Date(startRaw.getUTCFullYear(), startRaw.getUTCMonth(), startRaw.getUTCDate());
         const monthStr = start.toLocaleString('default', { month: 'long', year: 'numeric' });
         const today = new Date();
         const currentMonthStart = new Date(today.getFullYear(), today.getMonth(), 1);
 
         let iterDate = new Date(start.getFullYear(), start.getMonth(), 1);
+        const leaseEndRaw = new Date(updatedLease.endDate || new Date());
+        const leaseEnd = new Date(leaseEndRaw.getUTCFullYear(), leaseEndRaw.getUTCMonth(), leaseEndRaw.getUTCDate());
+        const effectiveEnd = leaseEnd < currentMonthStart ? leaseEnd : currentMonthStart;
 
-        while (iterDate <= currentMonthStart) {
+        while (iterDate <= effectiveEnd) {
             const currentIterMonthStr = iterDate.toLocaleString('default', { month: 'long', year: 'numeric' });
 
             const existingInvoice = await tx.invoice.findFirst({
@@ -625,12 +629,17 @@ exports.createLease = catchAsync(async (req, res, next) => {
             where: { unitId: uId, tenantId: tId, status: 'DRAFT' }
         });
 
+        const today = new Date();
+        today.setHours(0, 0, 0, 0);
+        const leaseEndRaw = new Date(endDate);
+        const leaseEnd = new Date(leaseEndRaw.getUTCFullYear(), leaseEndRaw.getUTCMonth(), leaseEndRaw.getUTCDate());
+
         const leaseData = {
             startDate: new Date(startDate),
-            endDate: new Date(endDate),
+            endDate: leaseEndRaw, // Keep the UTC raw for DB
             monthlyRent: parseFloat(monthlyRent) || 0,
             securityDeposit: parseFloat(securityDeposit) || 0,
-            status: 'Active',
+            status: leaseEnd < today ? 'Expired' : 'Active',
             leaseType: isBedroomLease ? 'BEDROOM' : 'FULL_UNIT',
             bedroomId: bId
         };
@@ -744,15 +753,16 @@ exports.createLease = catchAsync(async (req, res, next) => {
         }
 
         // 3. Auto-create Invoices (Pro-rata + Past Months)
-        const start = new Date(startDate);
+        const startRaw = new Date(startDate);
+        const start = new Date(startRaw.getUTCFullYear(), startRaw.getUTCMonth(), startRaw.getUTCDate());
         const monthStr = start.toLocaleString('default', { month: 'long', year: 'numeric' });
-        const today = new Date();
-        const currentMonthStart = new Date(today.getFullYear(), today.getMonth(), 1);
-
         let iterDate = new Date(start.getFullYear(), start.getMonth(), 1);
         const billableTenantId = targetTenant.type === 'RESIDENT' ? targetTenant.parentId : tId;
 
-        while (iterDate <= currentMonthStart) {
+        const currentMonthStart = new Date(today.getFullYear(), today.getMonth(), 1);
+        const effectiveEnd = leaseEnd < currentMonthStart ? leaseEnd : currentMonthStart;
+
+        while (iterDate <= effectiveEnd) {
             const currentIterMonthStr = iterDate.toLocaleString('default', { month: 'long', year: 'numeric' });
 
             const existingInvoice = await tx.invoice.findFirst({
@@ -867,7 +877,7 @@ exports.createLease = catchAsync(async (req, res, next) => {
     // but the frontend will send it explicitly)
     const sendCredentials = req.body.sendCredentials === true;
 
-    let notificationResult = { status: 'Skipped', message: 'Credentials not sent by user request.' };
+    let notificationResult = { status: 'Skipped', message: 'Credentials not sent.' };
 
     if (sendCredentials) {
         notificationResult = await processOnboardingInvitations(tId, coTenantIds, ['email', 'sms'], req.get('origin'));
