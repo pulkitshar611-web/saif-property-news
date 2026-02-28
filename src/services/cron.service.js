@@ -50,8 +50,26 @@ const initLeaseCron = () => {
                             data: { status: 'Expired' }
                         });
 
-                        // 3. Update unit status to Vacant, but ONLY if not Under Maintenance
-                        // and check if there are any other active/draft leases for this unit (safety check)
+                        // 3. Reset tenant and residents
+                        await tx.user.updateMany({
+                            where: { leaseId: lease.id, type: 'RESIDENT' },
+                            data: { leaseId: null }
+                        });
+                        
+                        // We safely update the tenant's assignments if they aren't on another active lease
+                        const tenantOtherLeases = await tx.lease.findFirst({
+                            where: { tenantId: lease.tenantId, status: 'Active', NOT: { id: lease.id } }
+                        });
+                        if (!tenantOtherLeases) {
+                            await tx.user.update({
+                                where: { id: lease.tenantId },
+                                data: { bedroomId: null, unitId: null, buildingId: null }
+                            });
+                        }
+
+                        // 4. Update unit and bedroom status
+                        const isFullUnitLease = !lease.bedroomId;
+
                         const otherActiveLeases = await tx.lease.findMany({
                             where: {
                                 unitId: lease.unitId,
@@ -60,11 +78,48 @@ const initLeaseCron = () => {
                             }
                         });
 
-                        if (lease.unit.status !== 'Under Maintenance' && otherActiveLeases.length === 0) {
-                            await tx.unit.update({
-                                where: { id: lease.unitId },
+                        if (isFullUnitLease) {
+                            if (lease.unit.status !== 'Under Maintenance' && otherActiveLeases.length === 0) {
+                                await tx.unit.update({
+                                    where: { id: lease.unitId },
+                                    data: { status: 'Vacant' }
+                                });
+                                await tx.bedroom.updateMany({
+                                    where: { unitId: lease.unitId },
+                                    data: { status: 'Vacant' }
+                                });
+                            }
+                        } else {
+                            // Bedroom lease
+                            await tx.bedroom.update({
+                                where: { id: lease.bedroomId },
                                 data: { status: 'Vacant' }
                             });
+                            
+                            if (lease.unit.status !== 'Under Maintenance') {
+                                const unitBedrooms = await tx.bedroom.findMany({
+                                    where: { unitId: lease.unitId }
+                                });
+                                const allVacant = unitBedrooms.length > 0 && unitBedrooms.every(b => b.status === 'Vacant');
+                                const anyOccupied = unitBedrooms.some(b => b.status === 'Occupied');
+                                
+                                if (allVacant && otherActiveLeases.length === 0) {
+                                    await tx.unit.update({
+                                        where: { id: lease.unitId },
+                                        data: { status: 'Vacant' }
+                                    });
+                                } else if (anyOccupied) {
+                                    await tx.unit.update({
+                                        where: { id: lease.unitId },
+                                        data: { status: 'Occupied' }
+                                    });
+                                } else if (otherActiveLeases.length === 0) {
+                                    await tx.unit.update({
+                                        where: { id: lease.unitId },
+                                        data: { status: 'Vacant' }
+                                    });
+                                }
+                            }
                         }
 
                         processedCount++;
