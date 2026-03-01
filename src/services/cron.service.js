@@ -16,7 +16,8 @@ const initLeaseCron = () => {
 
     cron.schedule(cronTime, async () => {
         console.log('[Cron] Running daily lease expiry check...');
-        const today = new Date();
+        const timeZone = process.env.TZ || 'Asia/Kolkata';
+        const today = new Date(new Date().toLocaleString("en-US", { timeZone }));
         today.setHours(0, 0, 0, 0);
 
         try {
@@ -55,7 +56,7 @@ const initLeaseCron = () => {
                             where: { leaseId: lease.id, type: 'RESIDENT' },
                             data: { leaseId: null }
                         });
-                        
+
                         // We safely update the tenant's assignments if they aren't on another active lease
                         const tenantOtherLeases = await tx.lease.findFirst({
                             where: { tenantId: lease.tenantId, status: 'Active', NOT: { id: lease.id } }
@@ -95,14 +96,14 @@ const initLeaseCron = () => {
                                 where: { id: lease.bedroomId },
                                 data: { status: 'Vacant' }
                             });
-                            
+
                             if (lease.unit.status !== 'Under Maintenance') {
                                 const unitBedrooms = await tx.bedroom.findMany({
                                     where: { unitId: lease.unitId }
                                 });
                                 const allVacant = unitBedrooms.length > 0 && unitBedrooms.every(b => b.status === 'Vacant');
                                 const anyOccupied = unitBedrooms.some(b => b.status === 'Occupied');
-                                
+
                                 if (allVacant && otherActiveLeases.length === 0) {
                                     await tx.unit.update({
                                         where: { id: lease.unitId },
