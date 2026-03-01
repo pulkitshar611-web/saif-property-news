@@ -663,93 +663,124 @@ exports.createLease = catchAsync(async (req, res, next) => {
         }
 
         // UPDATE STATUSES BASED ON LEASE TYPE
-        if (isFullUnitLease) {
-            // Full Unit Lease: Mark unit as Fully Booked (if Individual) or Occupied (if Company)
-            const isCompanyLease = targetTenant.type === 'COMPANY';
-            await tx.unit.update({
-                where: { id: uId },
-                data: {
-                    status: isCompanyLease ? 'Occupied' : 'Fully Booked',
-                    rentalMode: 'FULL_UNIT'
-                }
-            });
+        if (leaseData.status === 'Active') {
+            if (isFullUnitLease) {
+                // Full Unit Lease: Mark unit as Fully Booked (if Individual) or Occupied (if Company)
+                const isCompanyLease = targetTenant.type === 'COMPANY';
+                await tx.unit.update({
+                    where: { id: uId },
+                    data: {
+                        status: isCompanyLease ? 'Occupied' : 'Fully Booked',
+                        rentalMode: 'FULL_UNIT'
+                    }
+                });
 
-            // Mark all bedrooms as Occupied
-            if (unit.bedroomsList.length > 0) {
-                await tx.bedroom.updateMany({
-                    where: { unitId: uId },
+                // Mark all bedrooms as Occupied
+                if (unit.bedroomsList.length > 0) {
+                    await tx.bedroom.updateMany({
+                        where: { unitId: uId },
+                        data: { status: 'Occupied' }
+                    });
+                }
+
+                // Update tenant's bedroomId to null (full unit, not specific bedroom)
+                await tx.user.update({
+                    where: { id: tId },
+                    data: { bedroomId: null }
+                });
+            } else {
+                // Bedroom Lease: Mark specific bedroom as Occupied
+                await tx.bedroom.update({
+                    where: { id: bId },
                     data: { status: 'Occupied' }
                 });
-            }
 
-            // Update tenant's bedroomId to null (full unit, not specific bedroom)
-            await tx.user.update({
-                where: { id: tId },
-                data: { bedroomId: null }
-            });
-        } else {
-            // Bedroom Lease: Mark specific bedroom as Occupied
-            await tx.bedroom.update({
-                where: { id: bId },
-                data: { status: 'Occupied' }
-            });
+                // Ensure unit is in BEDROOM_WISE mode when a bedroom lease is created
+                await tx.unit.update({
+                    where: { id: uId },
+                    data: { rentalMode: 'BEDROOM_WISE' }
+                });
 
-            // Ensure unit is in BEDROOM_WISE mode when a bedroom lease is created
-            await tx.unit.update({
-                where: { id: uId },
-                data: { rentalMode: 'BEDROOM_WISE' }
-            });
-
-            // Check if all bedrooms are now occupied BY INDIVIDUAL RESIDENT LEASES if it's a company-leased unit
-            const updatedUnit = await tx.unit.findUnique({
-                where: { id: uId },
-                include: {
-                    bedroomsList: true,
-                    leases: {
-                        where: { status: 'Active', leaseType: 'BEDROOM' }
+                // Check if all bedrooms are now occupied BY INDIVIDUAL RESIDENT LEASES if it's a company-leased unit
+                const updatedUnit = await tx.unit.findUnique({
+                    where: { id: uId },
+                    include: {
+                        bedroomsList: true,
+                        leases: {
+                            where: { status: 'Active', leaseType: 'BEDROOM' }
+                        }
                     }
-                }
-            });
+                });
 
-            const hasCompanyLease = unit.leases.some(l => l.status === 'Active' && l.tenant.type === 'COMPANY');
-            const allOccupied = updatedUnit.bedroomsList.every(b => b.status === 'Occupied');
+                const hasCompanyLease = unit.leases.some(l => l.status === 'Active' && l.tenant.type === 'COMPANY');
+                const allOccupied = updatedUnit.bedroomsList.every(b => b.status === 'Occupied');
 
-            if (allOccupied) {
-                if (hasCompanyLease) {
-                    // If it's a company unit, only mark Fully Booked if all bedrooms have specific resident leases
-                    const residentLeaseCount = updatedUnit.leases.length;
-                    if (residentLeaseCount === updatedUnit.bedroomsList.length) {
+                if (allOccupied) {
+                    if (hasCompanyLease) {
+                        // If it's a company unit, only mark Fully Booked if all bedrooms have specific resident leases
+                        const residentLeaseCount = updatedUnit.leases.length;
+                        if (residentLeaseCount === updatedUnit.bedroomsList.length) {
+                            await tx.unit.update({
+                                where: { id: uId },
+                                data: { status: 'Fully Booked' }
+                            });
+                        } else {
+                            // Still some rooms without individual residents assigned
+                            await tx.unit.update({
+                                where: { id: uId },
+                                data: { status: 'Occupied' }
+                            });
+                        }
+                    } else {
+                        // Individual bedroom-wise leasing: all rooms occupied = Fully Booked
                         await tx.unit.update({
                             where: { id: uId },
                             data: { status: 'Fully Booked' }
                         });
-                    } else {
-                        // Still some rooms without individual residents assigned
-                        await tx.unit.update({
-                            where: { id: uId },
-                            data: { status: 'Occupied' }
-                        });
                     }
                 } else {
-                    // Individual bedroom-wise leasing: all rooms occupied = Fully Booked
+                    // Some bedrooms still vacant, mark as Occupied
                     await tx.unit.update({
                         where: { id: uId },
-                        data: { status: 'Fully Booked' }
+                        data: { status: 'Occupied' }
                     });
                 }
-            } else {
-                // Some bedrooms still vacant, mark as Occupied
-                await tx.unit.update({
-                    where: { id: uId },
-                    data: { status: 'Occupied' }
+
+                // Update tenant's bedroomId
+                await tx.user.update({
+                    where: { id: tId },
+                    data: { bedroomId: bId }
                 });
             }
-
-            // Update tenant's bedroomId
+        } else if (leaseData.status === 'Expired') {
+            // For explicitly expired leases (like past dates), ensure tenant assignment logic runs but don't mark unit occupied
+            // Just update the tenant's mapping correctly so history/records hold.
             await tx.user.update({
                 where: { id: tId },
-                data: { bedroomId: bId }
+                data: { bedroomId: isFullUnitLease ? null : bId }
             });
+
+            // Explicitly set unit to Vacant if no other active leases exist on it
+            const otherActiveLeases = await tx.lease.findMany({
+                where: {
+                    unitId: uId,
+                    status: { in: ['Active', 'DRAFT'] }
+                }
+            });
+
+            if (otherActiveLeases.length === 0) {
+                await tx.unit.update({
+                    where: { id: uId },
+                    data: { status: 'Vacant' }
+                });
+
+                if (unit.bedroomsList.length > 0) {
+                    await tx.bedroom.updateMany({
+                        where: { unitId: uId },
+                        data: { status: 'Vacant' }
+                    });
+                }
+            }
         }
 
         // 3. Auto-create Invoices (Pro-rata + Past Months)
