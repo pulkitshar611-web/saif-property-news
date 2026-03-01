@@ -244,6 +244,7 @@ exports.updateLease = catchAsync(async (req, res, next) => {
         if (startDate) leaseUpdateData.startDate = new Date(startDate);
 
         let shouldExpire = false;
+        let shouldReactivate = false;
         if (endDate) {
             const newEndDate = new Date(endDate);
             leaseUpdateData.endDate = newEndDate;
@@ -258,6 +259,7 @@ exports.updateLease = catchAsync(async (req, res, next) => {
                 shouldExpire = true;
             } else if (checkEnd >= today && existingLease.status === 'Expired') {
                 leaseUpdateData.status = 'Active';
+                shouldReactivate = true;
             }
         }
 
@@ -322,6 +324,81 @@ exports.updateLease = catchAsync(async (req, res, next) => {
                 }
             }
         }
+
+        // 3.6. Reactivate unit if lease is extended
+        if (shouldReactivate) {
+            const isFullUnitLease = updatedLease.leaseType === 'FULL_UNIT';
+
+            // Relink tenant assignments
+            await tx.user.update({
+                where: { id: existingLease.tenantId },
+                data: {
+                    buildingId: updatedLease.unit.propertyId,
+                    unitId: updatedLease.unitId,
+                    bedroomId: updatedLease.bedroomId
+                }
+            });
+
+            // Relink residents
+            await tx.user.updateMany({
+                where: { parentId: existingLease.tenantId, type: 'RESIDENT' },
+                data: { leaseId: id }
+            });
+
+            if (isFullUnitLease) {
+                const isCompanyLease = existingLease.tenant.type === 'COMPANY';
+                await tx.unit.update({
+                    where: { id: updatedLease.unitId },
+                    data: {
+                        status: isCompanyLease ? 'Occupied' : 'Fully Booked',
+                        rentalMode: 'FULL_UNIT'
+                    }
+                });
+
+                if (updatedLease.unit.bedroomsList.length > 0) {
+                    await tx.bedroom.updateMany({
+                        where: { unitId: updatedLease.unitId },
+                        data: { status: 'Occupied' }
+                    });
+                }
+            } else {
+                await tx.bedroom.update({
+                    where: { id: updatedLease.bedroomId },
+                    data: { status: 'Occupied' }
+                });
+
+                await tx.unit.update({
+                    where: { id: updatedLease.unitId },
+                    data: { rentalMode: 'BEDROOM_WISE' }
+                });
+
+                const unitWithBedrooms = await tx.unit.findUnique({
+                    where: { id: updatedLease.unitId },
+                    include: { bedroomsList: true, leases: { where: { status: 'Active', leaseType: 'BEDROOM' } } }
+                });
+
+                const allOccupied = unitWithBedrooms.bedroomsList.every(b => b.status === 'Occupied');
+                const hasCompanyLease = await tx.lease.findFirst({
+                    where: { unitId: updatedLease.unitId, status: 'Active', tenant: { type: 'COMPANY' } }
+                });
+
+                if (allOccupied) {
+                    if (hasCompanyLease) {
+                        const residentLeaseCount = unitWithBedrooms.leases.length;
+                        if (residentLeaseCount === unitWithBedrooms.bedroomsList.length) {
+                            await tx.unit.update({ where: { id: updatedLease.unitId }, data: { status: 'Fully Booked' } });
+                        } else {
+                            await tx.unit.update({ where: { id: updatedLease.unitId }, data: { status: 'Occupied' } });
+                        }
+                    } else {
+                        await tx.unit.update({ where: { id: updatedLease.unitId }, data: { status: 'Fully Booked' } });
+                    }
+                } else {
+                    await tx.unit.update({ where: { id: updatedLease.unitId }, data: { status: 'Occupied' } });
+                }
+            }
+        }
+
 
         // 4. Sync with existing UNPAID invoices for this lease if rent changed
         if (leaseUpdateData.monthlyRent !== undefined) {
