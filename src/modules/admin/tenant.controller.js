@@ -151,7 +151,13 @@ exports.getAllTenants = async (req, res) => {
                 parentName: t.parent ? t.parent.name || `${t.parent.firstName || ''} ${t.parent.lastName || ''}`.trim() : null,
                 hasPortalAccess: !!t.password,
                 companyContacts: t.companyContacts,
-                isInviteSent: (t.email && invitedRecipients.has(t.email)) || (t.phone && invitedRecipients.has(t.phone))
+                isInviteSent: (t.email && invitedRecipients.has(t.email)) || (t.phone && invitedRecipients.has(t.phone)),
+                companyDetails: t.companyDetails,
+                street: t.street,
+                city: t.city,
+                state: t.state,
+                postalCode: t.postalCode,
+                country: t.country
             };
         });
 
@@ -610,13 +616,13 @@ exports.updateTenant = catchAsync(async (req, res, next) => {
                 email,
                 phone,
                 type: normalizedType,
-                companyName: normalizedType === 'COMPANY' ? companyName : null,
-                companyDetails: normalizedType === 'COMPANY' ? companyDetails : null,
-                street: street || undefined,
-                city: city || undefined,
-                state: state || undefined,
-                postalCode: postalCode || undefined,
-                country: country || undefined,
+                companyName: normalizedType === 'COMPANY' ? (companyName || null) : null,
+                companyDetails: normalizedType === 'COMPANY' ? (companyDetails || null) : null,
+                street: street !== undefined ? street : undefined,
+                city: city !== undefined ? city : undefined,
+                state: state !== undefined ? state : undefined,
+                postalCode: postalCode !== undefined ? postalCode : undefined,
+                country: country !== undefined ? country : undefined,
                 buildingId: sanitizedBuildingId,
                 unitId: sanitizedUnitId,
                 bedroomId: sanitizedBedroomId,
@@ -691,13 +697,15 @@ exports.updateTenant = catchAsync(async (req, res, next) => {
         }
     }
 
-    if (newUnitId && normalizedType !== 'RESIDENT') {
+    if (newUnitId && normalizedType !== 'RESIDENT' && normalizedType !== 'COMPANY') {
         const currentLease = await prisma.lease.findFirst({
             where: {
                 tenantId: id,
                 status: { in: ['ACTIVE', 'Active', 'DRAFT'] }
             }
         });
+
+        const leaseType = newBedroomId ? 'BEDROOM' : 'FULL_UNIT';
 
         if (currentLease && currentLease.unitId !== newUnitId) {
             // Logic to move lease
@@ -712,6 +720,7 @@ exports.updateTenant = catchAsync(async (req, res, next) => {
                         tenantId: id,
                         unitId: newUnitId,
                         bedroomId: newBedroomId || null,
+                        leaseType: leaseType,
                         status: 'ACTIVE',
                     }
                 });
@@ -720,7 +729,8 @@ exports.updateTenant = catchAsync(async (req, res, next) => {
                     where: { id: currentLease.id },
                     data: {
                         unitId: newUnitId,
-                        bedroomId: newBedroomId || null
+                        bedroomId: newBedroomId || null,
+                        leaseType: leaseType
                     }
                 });
             }
@@ -731,6 +741,7 @@ exports.updateTenant = catchAsync(async (req, res, next) => {
                     tenantId: id,
                     unitId: newUnitId,
                     bedroomId: newBedroomId || null,
+                    leaseType: leaseType,
                     status: 'ACTIVE',
                 }
             });
