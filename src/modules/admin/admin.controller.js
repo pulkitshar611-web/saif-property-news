@@ -43,20 +43,20 @@ exports.getDashboardStats = async (req, res) => {
             where: unitFilter
         });
 
-        // 3. Occupancy (Occupied vs Vacant)
+        // 3. Occupancy — any unit that is not 'Vacant' is considered occupied
         const occupiedUnits = await prisma.unit.count({
             where: {
-                status: 'Occupied',
+                status: { in: ['Occupied', 'Fully Booked'] },
                 ...unitFilter
-            },
+            }
         });
         const vacantUnits = totalUnits - occupiedUnits;
 
-        // 4. Revenue Calculation
+        // 4. Revenue Calculation — use unitFilter (not raw propertyIds) so global view works
         const leaseAgg = await prisma.lease.aggregate({
             where: {
                 status: 'Active',
-                unit: { propertyId: { in: propertyIds } }
+                unit: unitFilter
             },
             _sum: { monthlyRent: true }
         });
@@ -64,25 +64,51 @@ exports.getDashboardStats = async (req, res) => {
 
         const invoiceAgg = await prisma.invoice.aggregate({
             where: {
-                unit: { propertyId: { in: propertyIds } }
+                unit: unitFilter
             },
             _sum: { paidAmount: true }
         });
         const actualRevenue = parseFloat(invoiceAgg._sum.paidAmount) || 0;
 
-        // 5. Recent Activity (Tickets - Using ID filter for safety)
-        const recentTickets = await prisma.ticket.findMany({
-            where: parsedOwnerId ? {
-                OR: [
-                    { propertyId: { in: propertyIds } },
-                    { unitId: { in: propertyIds.length > 0 ? (await prisma.unit.findMany({ where: { propertyId: { in: propertyIds } }, select: { id: true } })).map(u => u.id) : [] } }
-                ]
-            } : {},
-            take: 5,
-            orderBy: { createdAt: 'desc' },
-            include: { user: true }
-        });
-        const recentActivity = recentTickets.map(t => `${t.user?.name || 'Someone'} created ticket: ${t.subject}`);
+        // 5. Recent Activity — multi-source: leases, payments, tenants
+        const [recentLeases, recentPayments, recentTenants] = await Promise.all([
+            prisma.lease.findMany({
+                where: { unit: unitFilter },
+                take: 5,
+                orderBy: { createdAt: 'desc' },
+                include: { tenant: { select: { name: true } }, unit: { select: { name: true, property: { select: { name: true } } } } }
+            }),
+            prisma.payment.findMany({
+                where: { invoice: { unit: unitFilter } },
+                take: 5,
+                orderBy: { date: 'desc' },
+                include: { invoice: { include: { tenant: { select: { name: true } }, unit: { select: { name: true } } } } }
+            }),
+            prisma.user.findMany({
+                where: { role: 'TENANT', ...(parsedOwnerId ? { residentLease: { unit: unitFilter } } : {}) },
+                take: 5,
+                orderBy: { createdAt: 'desc' },
+                select: { name: true, createdAt: true }
+            })
+        ]);
+
+        const activityItems = [
+            ...recentLeases.map(l => ({
+                text: `Lease created for ${l.tenant?.name || 'Tenant'} — ${l.unit?.property?.name || ''} / ${l.unit?.name || ''}`,
+                date: l.createdAt
+            })),
+            ...recentPayments.map(p => ({
+                text: `Payment of $${parseFloat(p.amount).toLocaleString('en-CA')} received from ${p.invoice?.tenant?.name || 'Tenant'} (${p.invoice?.unit?.name || ''})`,
+                date: p.date
+            })),
+            ...recentTenants.map(t => ({
+                text: `New tenant added: ${t.name || 'Unknown'}`,
+                date: t.createdAt
+            }))
+        ];
+
+        activityItems.sort((a, b) => new Date(b.date) - new Date(a.date));
+        const recentActivity = activityItems.slice(0, 8).map(a => a.text);
 
         // 6. Insurance Alerts
         const today = new Date();

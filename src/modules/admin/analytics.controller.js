@@ -19,9 +19,10 @@ exports.getRevenueStats = async (req, res) => {
             propertyIds = ownerProperties.map(p => p.id);
         }
 
+        // Use unitFilter correctly so global view (no owner) is not filtered to empty set
         const unitFilter = parsedOwnerId ? { propertyId: { in: propertyIds } } : {};
 
-        // 2. Projected Revenue (Requirement 7): Sum of monthlyRent across all Active leases
+        // Projected Revenue: Sum of monthlyRent across all Active leases
         const leaseAgg = await prisma.lease.aggregate({
             where: {
                 status: 'Active',
@@ -44,8 +45,8 @@ exports.getRevenueStats = async (req, res) => {
         let actualRent = 0;
         let actualDeposit = 0;
         let actualServiceFees = 0;
-        const propertyMap = {};
-        const monthlyMap = {};
+        const propertyMap = {};   // { propName: { amount, rent, deposit, serviceFees, monthly: { month: {...} } } }
+        const monthlyMap = {};    // { month: { amount, rent, deposit, serviceFees } }
 
         invoices.forEach(inv => {
             const amount = parseFloat(inv.paidAmount) || 0;
@@ -53,7 +54,7 @@ exports.getRevenueStats = async (req, res) => {
 
             let type = 'Rent';
             if (inv.category === 'SERVICE') {
-                if (inv.description && inv.description.includes('Secondary Deposit') || inv.description?.includes('Security Deposit')) {
+                if (inv.description && (inv.description.includes('Secondary Deposit') || inv.description.includes('Security Deposit'))) {
                     type = 'Deposit';
                     actualDeposit += amount;
                 } else {
@@ -64,36 +65,54 @@ exports.getRevenueStats = async (req, res) => {
                 actualRent += amount;
             }
 
-            // Breakdown by Property
+            // Breakdown by Property (cumulative + monthly)
             const propName = inv.unit?.property?.name || 'Other Building';
-            if (!propertyMap[propName]) propertyMap[propName] = { amount: 0, rent: 0, deposit: 0, serviceFees: 0 };
+            if (!propertyMap[propName]) propertyMap[propName] = { amount: 0, rent: 0, deposit: 0, serviceFees: 0, monthly: {} };
             propertyMap[propName].amount += amount;
             if (type === 'Rent') propertyMap[propName].rent += amount;
             else if (type === 'Deposit') propertyMap[propName].deposit += amount;
             else if (type === 'ServiceFees') propertyMap[propName].serviceFees += amount;
 
-            // Monthly Breakdown
-            if (!monthlyMap[inv.month]) monthlyMap[inv.month] = { amount: 0, rent: 0, deposit: 0, serviceFees: 0 };
-            monthlyMap[inv.month].amount += amount;
-            if (type === 'Rent') monthlyMap[inv.month].rent += amount;
-            else if (type === 'Deposit') monthlyMap[inv.month].deposit += amount;
-            else if (type === 'ServiceFees') monthlyMap[inv.month].serviceFees += amount;
+            // Monthly breakdown per property (for Issue 10)
+            const mon = inv.month;
+            if (!propertyMap[propName].monthly[mon]) propertyMap[propName].monthly[mon] = { amount: 0, rent: 0, deposit: 0, serviceFees: 0 };
+            propertyMap[propName].monthly[mon].amount += amount;
+            if (type === 'Rent') propertyMap[propName].monthly[mon].rent += amount;
+            else if (type === 'Deposit') propertyMap[propName].monthly[mon].deposit += amount;
+            else if (type === 'ServiceFees') propertyMap[propName].monthly[mon].serviceFees += amount;
+
+            // Global monthly breakdown
+            if (!monthlyMap[mon]) monthlyMap[mon] = { amount: 0, rent: 0, deposit: 0, serviceFees: 0 };
+            monthlyMap[mon].amount += amount;
+            if (type === 'Rent') monthlyMap[mon].rent += amount;
+            else if (type === 'Deposit') monthlyMap[mon].deposit += amount;
+            else if (type === 'ServiceFees') monthlyMap[mon].serviceFees += amount;
         });
 
+        // Sort monthly data chronologically (Issue 4 fix)
+        const monthlyRevenue = Object.keys(monthlyMap)
+            .sort((a, b) => a.localeCompare(b))
+            .map(m => ({
+                month: m,
+                amount: monthlyMap[m].amount,
+                rent: monthlyMap[m].rent,
+                deposit: monthlyMap[m].deposit,
+                serviceFees: monthlyMap[m].serviceFees
+            }));
+
+        // Build revenueByProperty with monthly breakdown (Issue 10)
         const revenueByProperty = Object.keys(propertyMap).map(p => ({
             name: p,
             amount: propertyMap[p].amount,
             rent: propertyMap[p].rent,
             deposit: propertyMap[p].deposit,
-            serviceFees: propertyMap[p].serviceFees
-        }));
-
-        const monthlyRevenue = Object.keys(monthlyMap).map(m => ({
-            month: m,
-            amount: monthlyMap[m].amount,
-            rent: monthlyMap[m].rent,
-            deposit: monthlyMap[m].deposit,
-            serviceFees: monthlyMap[m].serviceFees
+            serviceFees: propertyMap[p].serviceFees,
+            monthly: Object.keys(propertyMap[p].monthly)
+                .sort((a, b) => a.localeCompare(b))
+                .map(m => ({
+                    month: m,
+                    ...propertyMap[p].monthly[m]
+                }))
         }));
 
         res.json({
@@ -102,7 +121,7 @@ exports.getRevenueStats = async (req, res) => {
             actualDeposit,
             actualServiceFees,
             projectedRevenue,
-            totalRevenue: actualRevenue, // Backward compatibility
+            totalRevenue: actualRevenue,
             monthlyRevenue,
             revenueByProperty
         });
@@ -118,40 +137,100 @@ exports.getVacancyStats = async (req, res) => {
         console.log('Vacancy Stats - Received ownerId:', ownerId);
         const parsedOwnerId = ownerId && ownerId !== 'null' && ownerId !== '' ? parseInt(ownerId) : null;
 
-        const units = await prisma.unit.findMany({
-            where: parsedOwnerId ? {
-                property: {
-                    owners: {
-                        some: { id: parsedOwnerId }
-                    }
+        const whereClause = parsedOwnerId ? {
+            property: {
+                owners: {
+                    some: { id: parsedOwnerId }
                 }
-            } : {},
-            include: { property: true }
+            }
+        } : {};
+
+        // Fetch all units with their bedrooms and active leases
+        const units = await prisma.unit.findMany({
+            where: whereClause,
+            include: {
+                property: true,
+                bedroomsList: true,
+                leases: {
+                    where: { status: 'Active' },
+                    select: { id: true, bedroomId: true }
+                }
+            }
         });
 
         const total = units.length;
-        const vacant = units.filter(u => u.status === 'Vacant').length;
-        const occupied = total - vacant;
 
-        // By Building
+        // Global summary: any unit not 'Vacant' is occupied
+        const occupied = units.filter(u => u.status !== 'Vacant').length;
+        const vacant = units.filter(u => u.status === 'Vacant').length;
+
+        // Breakdown for internal stats (keeping for backwards compat if needed, though they aren't used in main summary above anymore)
+        const fullUnitCount = units.filter(u => u.rentalMode === 'FULL_UNIT').length;
+        const bedroomWiseCount = units.filter(u => u.rentalMode === 'BEDROOM_WISE').length;
+
+        // Define bedroomWiseUnits for subsequent calculations
+        const bedroomWiseUnits = units.filter(u => u.rentalMode === 'BEDROOM_WISE');
+
+        // Vacant bedroom count across all BEDROOM_WISE units
+        let totalVacantBedrooms = 0;
+        bedroomWiseUnits.forEach(u => {
+            const leasedBedroomIds = new Set(u.leases.map(l => l.bedroomId).filter(Boolean));
+            const vacantBedrooms = u.bedroomsList.filter(b => b.status === 'Vacant' || !leasedBedroomIds.has(b.id)).length;
+            totalVacantBedrooms += vacantBedrooms;
+        });
+
+        // Vacancy by Building — distinguish FULL_UNIT vs BEDROOM_WISE (Issues 6 & 7)
         const buildingStats = {};
         units.forEach(u => {
             const propName = u.property?.name || 'Other';
-            if (!buildingStats[propName]) buildingStats[propName] = { total: 0, vacant: 0 };
+            if (!buildingStats[propName]) buildingStats[propName] = {
+                total: 0,
+                vacant: 0,
+                occupied: 0,
+                fullUnitVacant: 0,
+                vacantBedrooms: 0,
+                hasBedroomWise: false
+            };
             buildingStats[propName].total++;
-            if (u.status === 'Vacant') buildingStats[propName].vacant++;
+
+            if (u.rentalMode === 'FULL_UNIT') {
+                if (u.status === 'Vacant') {
+                    buildingStats[propName].vacant++;
+                    buildingStats[propName].fullUnitVacant++;
+                } else {
+                    buildingStats[propName].occupied++;
+                }
+            } else {
+                // BEDROOM_WISE
+                buildingStats[propName].hasBedroomWise = true;
+                if (u.leases.length === 0) {
+                    buildingStats[propName].vacant++;
+                } else {
+                    buildingStats[propName].occupied++;
+                    // Count vacant bedrooms
+                    const leasedBedroomIds = new Set(u.leases.map(l => l.bedroomId).filter(Boolean));
+                    const vBedrooms = u.bedroomsList.filter(b => b.status === 'Vacant' || !leasedBedroomIds.has(b.id)).length;
+                    buildingStats[propName].vacantBedrooms += vBedrooms;
+                }
+            }
         });
 
         const vacancyByBuilding = Object.keys(buildingStats).map(p => ({
             name: p,
             vacant: buildingStats[p].vacant,
-            total: buildingStats[p].total
+            occupied: buildingStats[p].occupied,
+            total: buildingStats[p].total,
+            vacantBedrooms: buildingStats[p].vacantBedrooms,
+            hasBedroomWise: buildingStats[p].hasBedroomWise
         }));
 
         res.json({
             total,
             vacant,
             occupied,
+            totalVacantBedrooms,
+            fullUnitCount,
+            bedroomWiseCount,
             vacancyByBuilding
         });
     } catch (e) {
