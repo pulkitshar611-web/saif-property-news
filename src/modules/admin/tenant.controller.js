@@ -832,8 +832,11 @@ exports.sendInvite = catchAsync(async (req, res, next) => {
         }
     });
 
-    const requestOrigin = req.get('origin');
-    const loginUrl = (requestOrigin && allowedOrigins.includes(requestOrigin) ? requestOrigin : process.env.FRONTEND_URL) || allowedOrigins[4];
+    const requestOrigin = req.get('origin') || req.get('referer')?.split('/').slice(0, 3).join('/');
+    const cleanOrigin = requestOrigin?.replace(/\/$/, ''); // Remove trailing slash
+    const isAllowed = allowedOrigins.some(o => o.replace(/\/$/, '') === cleanOrigin);
+
+    const loginUrl = (cleanOrigin && isAllowed ? cleanOrigin : process.env.FRONTEND_URL) || allowedOrigins[4];
 
     const inviteLink = `${loginUrl}/tenant/invite/${inviteToken}`;
 

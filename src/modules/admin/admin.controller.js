@@ -135,6 +135,58 @@ exports.getDashboardStats = async (req, res) => {
             }
         });
 
+        // 7. Lease Expiration Alerts (Custom Business Rules)
+        const activeLeases = await prisma.lease.findMany({
+            where: {
+                status: 'Active',
+                unit: unitFilter
+            },
+            include: {
+                tenant: { select: { name: true } },
+                unit: { select: { name: true, property: { select: { name: true } } } }
+            }
+        });
+
+        const alertList = [];
+        let expiredLeasesCountTotal = 0;
+        let expiringSoonLeasesCountTotal = 0;
+
+        activeLeases.forEach(l => {
+            const start = new Date(l.startDate);
+            const end = new Date(l.endDate);
+            const diffDays = Math.ceil((end - today) / (1000 * 60 * 60 * 24));
+
+            const durationMonths = (end.getFullYear() - start.getFullYear()) * 12 + (end.getMonth() - start.getMonth());
+            const isLongTerm = durationMonths >= 12;
+
+            if (diffDays < 0) {
+                expiredLeasesCountTotal++;
+                alertList.push({
+                    id: l.id,
+                    tenant: l.tenant?.name || 'Unknown',
+                    unit: `${l.unit?.property?.name} / ${l.unit?.name}`,
+                    expiryDate: l.endDate,
+                    daysLeft: diffDays,
+                    status: 'Expired',
+                    type: isLongTerm ? 'Long-Term (12m+)' : 'Short-Term (<12m)'
+                });
+            } else {
+                const threshold = isLongTerm ? 120 : 45;
+                if (diffDays <= threshold) {
+                    expiringSoonLeasesCountTotal++;
+                    alertList.push({
+                        id: l.id,
+                        tenant: l.tenant?.name || 'Unknown',
+                        unit: `${l.unit?.property?.name} / ${l.unit?.name}`,
+                        expiryDate: l.endDate,
+                        daysLeft: diffDays,
+                        status: 'Expiring Soon',
+                        type: isLongTerm ? 'Long-Term (12m+)' : 'Short-Term (<12m)'
+                    });
+                }
+            }
+        });
+
         res.json({
             totalProperties,
             totalUnits,
@@ -149,6 +201,11 @@ exports.getDashboardStats = async (req, res) => {
                 expired: expiredInsurance,
                 expiringSoon: expiringSoon
             },
+            leaseAlerts: {
+                expired: expiredLeasesCountTotal,
+                expiringSoon: expiringSoonLeasesCountTotal
+            },
+            leaseAlertList: alertList,
             recentActivity,
         });
     } catch (error) {
