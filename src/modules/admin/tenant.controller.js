@@ -836,7 +836,7 @@ exports.sendInvite = catchAsync(async (req, res, next) => {
     const cleanOrigin = requestOrigin?.replace(/\/$/, ''); // Remove trailing slash
     const isAllowed = allowedOrigins.some(o => o.replace(/\/$/, '') === cleanOrigin);
 
-    const loginUrl = (cleanOrigin && isAllowed ? cleanOrigin : process.env.FRONTEND_URL) || allowedOrigins[4];
+    const loginUrl = (cleanOrigin && isAllowed ? cleanOrigin : process.env.FRONTEND_URL) || "https://masteko-pm.ca";
 
     const inviteLink = `${loginUrl}/tenant/invite/${inviteToken}`;
 

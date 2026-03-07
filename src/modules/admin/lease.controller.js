@@ -346,11 +346,10 @@ exports.updateLease = catchAsync(async (req, res, next) => {
             });
 
             if (isFullUnitLease) {
-                const isCompanyLease = existingLease.tenant.type === 'COMPANY';
                 await tx.unit.update({
                     where: { id: updatedLease.unitId },
                     data: {
-                        status: isCompanyLease ? 'Occupied' : 'Fully Booked',
+                        status: 'Fully Booked',
                         rentalMode: 'FULL_UNIT'
                     }
                 });
@@ -378,24 +377,10 @@ exports.updateLease = catchAsync(async (req, res, next) => {
                 });
 
                 const allOccupied = unitWithBedrooms.bedroomsList.every(b => b.status === 'Occupied');
-                const hasCompanyLease = await tx.lease.findFirst({
-                    where: { unitId: updatedLease.unitId, status: 'Active', tenant: { type: 'COMPANY' } }
+                await tx.unit.update({
+                    where: { id: updatedLease.unitId },
+                    data: { status: allOccupied ? 'Fully Booked' : 'Occupied' }
                 });
-
-                if (allOccupied) {
-                    if (hasCompanyLease) {
-                        const residentLeaseCount = unitWithBedrooms.leases.length;
-                        if (residentLeaseCount === unitWithBedrooms.bedroomsList.length) {
-                            await tx.unit.update({ where: { id: updatedLease.unitId }, data: { status: 'Fully Booked' } });
-                        } else {
-                            await tx.unit.update({ where: { id: updatedLease.unitId }, data: { status: 'Occupied' } });
-                        }
-                    } else {
-                        await tx.unit.update({ where: { id: updatedLease.unitId }, data: { status: 'Fully Booked' } });
-                    }
-                } else {
-                    await tx.unit.update({ where: { id: updatedLease.unitId }, data: { status: 'Occupied' } });
-                }
             }
         }
 
@@ -815,12 +800,11 @@ exports.createLease = catchAsync(async (req, res, next) => {
         // UPDATE STATUSES BASED ON LEASE TYPE ONLY IF ACTIVE
         if (leaseData.status === 'Active') {
             if (isFullUnitLease) {
-                // Full Unit Lease: Mark unit as Fully Booked (if Individual) or Occupied (if Company)
-                const isCompanyLease = targetTenant.type === 'COMPANY';
+                // Full Unit Lease: Mark unit as Fully Booked
                 await tx.unit.update({
                     where: { id: uId },
                     data: {
-                        status: isCompanyLease ? 'Occupied' : 'Fully Booked',
+                        status: 'Fully Booked',
                         rentalMode: 'FULL_UNIT'
                     }
                 });
@@ -862,39 +846,11 @@ exports.createLease = catchAsync(async (req, res, next) => {
                     }
                 });
 
-                const hasCompanyLease = unit.leases.some(l => l.status === 'Active' && l.tenant.type === 'COMPANY');
                 const allOccupied = updatedUnit.bedroomsList.every(b => b.status === 'Occupied');
-
-                if (allOccupied) {
-                    if (hasCompanyLease) {
-                        // If it's a company unit, only mark Fully Booked if all bedrooms have specific resident leases
-                        const residentLeaseCount = updatedUnit.leases.length;
-                        if (residentLeaseCount === updatedUnit.bedroomsList.length) {
-                            await tx.unit.update({
-                                where: { id: uId },
-                                data: { status: 'Fully Booked' }
-                            });
-                        } else {
-                            // Still some rooms without individual residents assigned
-                            await tx.unit.update({
-                                where: { id: uId },
-                                data: { status: 'Occupied' }
-                            });
-                        }
-                    } else {
-                        // Individual bedroom-wise leasing: all rooms occupied = Fully Booked
-                        await tx.unit.update({
-                            where: { id: uId },
-                            data: { status: 'Fully Booked' }
-                        });
-                    }
-                } else {
-                    // Some bedrooms still vacant, mark as Occupied
-                    await tx.unit.update({
-                        where: { id: uId },
-                        data: { status: 'Occupied' }
-                    });
-                }
+                await tx.unit.update({
+                    where: { id: uId },
+                    data: { status: allOccupied ? 'Fully Booked' : 'Occupied' }
+                });
 
                 // Update tenant's bedroomId
                 await tx.user.update({
@@ -1066,7 +1022,7 @@ const processOnboardingInvitations = async (tenantId, coTenantIds = [], methods 
         const cleanOrigin = reqOrigin.replace(/\/$/, ''); // Remove trailing slash
         const isAllowed = allowedOrigins.some(o => o.replace(/\/$/, '') === cleanOrigin);
 
-        const loginUrl = (cleanOrigin && isAllowed ? cleanOrigin : process.env.FRONTEND_URL) || allowedOrigins[4];
+        const loginUrl = (cleanOrigin && isAllowed ? cleanOrigin : process.env.FRONTEND_URL) || "https://masteko-pm.ca";
 
         for (const user of users) {
             let password = null;

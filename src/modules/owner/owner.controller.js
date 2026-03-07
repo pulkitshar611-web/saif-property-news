@@ -11,10 +11,7 @@ exports.getOwnerDashboardStats = async (req, res) => {
 
         const properties = await prisma.property.findMany({
             where: {
-                OR: [
-                    { owners: { some: { id: ownerId } } },
-                    { companyId: user.companyId || -1 }
-                ]
+                owners: { some: { id: ownerId } }
             },
             select: { id: true }
         });
@@ -22,21 +19,41 @@ exports.getOwnerDashboardStats = async (req, res) => {
         const propertyCount = properties.length;
         const unitCount = await prisma.unit.count({ where: { propertyId: { in: propertyIds } } });
 
-        const occupiedCount = await prisma.unit.count({
-            where: { propertyId: { in: propertyIds }, status: 'Occupied' }
+        let occupiedUnitsCount = 0;
+        let vacantUnitsCount = 0;
+        let occupiedBedroomsCount = 0;
+        let vacantBedroomsCount = 0;
+
+        const units = await prisma.unit.findMany({
+            where: { propertyId: { in: propertyIds } },
+            include: { bedroomsList: true }
         });
 
-        const revenueAgg = await prisma.unit.aggregate({
-            where: { propertyId: { in: propertyIds }, status: 'Occupied' },
-            _sum: { rentAmount: true }
-        });
-        const monthlyRevenue = Number(revenueAgg._sum.rentAmount || 0);
+        units.forEach(u => {
+            if (u.rentalMode === 'BEDROOM_WISE') {
+                const occBeds = u.bedroomsList.filter(b => b.status === 'Occupied').length;
+                const vacBeds = u.bedroomsList.filter(b => b.status === 'Vacant').length;
+                occupiedBedroomsCount += occBeds;
+                vacantBedroomsCount += vacBeds;
 
-        const duesAgg = await prisma.invoice.aggregate({
-            where: { unit: { propertyId: { in: propertyIds } }, status: { not: 'paid' } },
-            _sum: { balanceDue: true }
+                // If any bed is occupied, the unit itself is not fully vacant, but we primarily report on beds here.
+                if (occBeds > 0) occupiedUnitsCount++;
+                else vacantUnitsCount++;
+            } else {
+                if (u.status === 'Occupied' || u.status === 'Fully Booked') {
+                    occupiedUnitsCount++;
+                } else {
+                    vacantUnitsCount++;
+                }
+            }
         });
-        const outstandingDues = Number(duesAgg._sum.balanceDue || 0);
+
+        const invoiceAgg = await prisma.invoice.aggregate({
+            where: { unit: { propertyId: { in: propertyIds } }, status: { notIn: ['draft', 'cancelled'] } },
+            _sum: { paidAmount: true, balanceDue: true }
+        });
+        const monthlyRevenue = Number(invoiceAgg._sum.paidAmount || 0);
+        const outstandingDues = Number(invoiceAgg._sum.balanceDue || 0);
 
         const thirtyDaysFromNow = new Date();
         thirtyDaysFromNow.setDate(thirtyDaysFromNow.getDate() + 30);
@@ -75,22 +92,28 @@ exports.getOwnerDashboardStats = async (req, res) => {
         });
         const tenants = activeLeases.map(l => ({
             id: l.tenantId,
-            name: `${l.tenant.firstName || ''} ${l.tenant.lastName || ''}`.trim() || l.tenant.email,
+            name: `${l.tenant.firstName || ''} ${l.tenant.lastName || ''}`.trim() || l.tenant.name || 'Unknown',
+            email: l.tenant.email || 'N/A',
             property: l.unit.property.name,
             unit: l.unit.unitNumber
         }));
 
-        const growthIdx = propertyCount > 0 ? (12.4 + (occupiedCount / (unitCount || 1)) * 2).toFixed(1) : "0.0";
+        const growthIdx = propertyCount > 0 ? (12.4 + (occupiedUnitsCount / (unitCount || 1)) * 2).toFixed(1) : "0.0";
 
         res.json({
             propertyCount,
             unitCount,
-            occupancy: { occupied: occupiedCount, vacant: unitCount - occupiedCount },
+            occupancy: {
+                occupiedUnits: occupiedUnitsCount,
+                vacantUnits: vacantUnitsCount,
+                occupiedBedrooms: occupiedBedroomsCount,
+                vacantBedrooms: vacantBedroomsCount
+            },
             monthlyRevenue,
             outstandingDues,
             insuranceExpiryCount,
             recentActivity: recentActivity.length > 0 ? recentActivity : ["Welcome to your dashboard", "Add properties to see activity"],
-            portfolioGrowth: `+${growthIdx}%`,
+            portfolioGrowth: `+0.0%`,
             tenants
         });
 
@@ -107,25 +130,44 @@ exports.getOwnerProperties = async (req, res) => {
         const user = await prisma.user.findUnique({ where: { id: ownerId } });
         const properties = await prisma.property.findMany({
             where: {
-                OR: [
-                    { owners: { some: { id: ownerId } } },
-                    { companyId: user.companyId || -1 }
-                ]
+                owners: { some: { id: ownerId } }
             },
-            include: { units: true, owners: true }
+            include: { units: { include: { bedroomsList: true } }, owners: true }
         });
 
         const formatted = await Promise.all(properties.map(async p => {
             const totalUnits = p.units.length;
-            const occupiedCount = p.units.filter(u => u.status === 'Occupied').length;
-            const occupancyRate = totalUnits > 0 ? Math.round((occupiedCount / totalUnits) * 100) : 0;
 
-            // Calculate revenue for this property
-            const revenueAgg = await prisma.unit.aggregate({
-                where: { propertyId: p.id, status: 'Occupied' },
-                _sum: { rentAmount: true }
+            let occupiedUnitsCount = 0;
+            let vacantUnitsCount = 0;
+            let occupiedBedroomsCount = 0;
+            let vacantBedroomsCount = 0;
+
+            p.units.forEach(u => {
+                if (u.rentalMode === 'BEDROOM_WISE') {
+                    const occBeds = u.bedroomsList.filter(b => b.status === 'Occupied').length;
+                    const vacBeds = u.bedroomsList.filter(b => b.status === 'Vacant').length;
+                    occupiedBedroomsCount += occBeds;
+                    vacantBedroomsCount += vacBeds;
+                    if (occBeds > 0) occupiedUnitsCount++;
+                    else vacantUnitsCount++;
+                } else {
+                    if (u.status === 'Occupied' || u.status === 'Fully Booked') {
+                        occupiedUnitsCount++;
+                    } else {
+                        vacantUnitsCount++;
+                    }
+                }
             });
-            const monthlyRevenue = Number(revenueAgg._sum.rentAmount || 0);
+
+            const occupancyRate = totalUnits > 0 ? Math.round((occupiedUnitsCount / totalUnits) * 100) : 0;
+
+            // Calculate actual revenue for this property based on invoices
+            const invoiceAgg = await prisma.invoice.aggregate({
+                where: { unit: { propertyId: p.id }, status: { notIn: ['draft', 'cancelled'] } },
+                _sum: { paidAmount: true }
+            });
+            const monthlyRevenue = Number(invoiceAgg._sum.paidAmount || 0);
 
             // Fetch active leases to determine next payment date (simplified: use 1st of next month)
             // or fetch next due invoice
@@ -174,13 +216,18 @@ exports.getOwnerProperties = async (req, res) => {
                 residentialCount,
                 commercialCount,
                 residentCount, // Pass to frontend
-                ownershipPercentage
+                ownershipPercentage,
+                occupiedUnits: occupiedUnitsCount,
+                vacantUnits: vacantUnitsCount,
+                occupiedBedrooms: occupiedBedroomsCount,
+                vacantBedrooms: vacantBedroomsCount
             };
         }));
 
         res.json(formatted);
     } catch (error) {
-        console.error(error);
+        console.error('PROPERTIES ERROR:', error);
+        require('fs').writeFileSync('debug-properties.txt', String(error.stack || error));
         res.status(500).json({ message: 'Error' });
     }
 };
@@ -191,13 +238,10 @@ exports.getOwnerFinancials = async (req, res) => {
         const ownerId = req.user.id;
         const user = await prisma.user.findUnique({ where: { id: ownerId } });
 
-        // Find properties for this owner OR company
+        // Find properties for this owner strictly
         const properties = await prisma.property.findMany({
             where: {
-                OR: [
-                    { owners: { some: { id: ownerId } } },
-                    { companyId: user.companyId || -1 }
-                ]
+                owners: { some: { id: ownerId } }
             }
         });
         const propertyIds = properties.map(p => p.id);
@@ -226,9 +270,9 @@ exports.getOwnerFinancials = async (req, res) => {
 
         const transactions = invoices.map(inv => ({
             id: inv.id,
-            property: inv.unit.property.name,
+            property: inv.unit?.property?.name || 'Unknown',
             date: inv.createdAt.toLocaleDateString(),
-            type: inv.category === 'SERVICE' ? 'Service Fee' : 'Rent Invoice',
+            type: inv.category === 'SERVICE' ? 'Deposit' : 'Rent Invoice',
             amount: parseFloat(inv.amount),
             paidAmount: parseFloat(inv.paidAmount),
             balance: parseFloat(inv.balanceDue),
@@ -257,13 +301,10 @@ exports.getOwnerFinancialPulse = async (req, res) => {
         const ownerId = req.user.id;
         const user = await prisma.user.findUnique({ where: { id: ownerId } });
 
-        // Get properties for this owner OR company
+        // Get properties strictly for this owner
         const properties = await prisma.property.findMany({
             where: {
-                OR: [
-                    { owners: { some: { id: ownerId } } },
-                    { companyId: user.companyId || -1 }
-                ]
+                owners: { some: { id: ownerId } }
             }
         });
         const propertyIds = properties.map(p => p.id);
@@ -281,6 +322,7 @@ exports.getOwnerFinancialPulse = async (req, res) => {
             const monthlyInvoices = await prisma.invoice.findMany({
                 where: {
                     unit: { propertyId: { in: propertyIds } },
+                    status: { notIn: ['draft', 'cancelled'] },
                     createdAt: {
                         gte: monthStart,
                         lte: monthEnd
@@ -326,10 +368,7 @@ exports.getOwnerReports = async (req, res) => {
         const user = await prisma.user.findUnique({ where: { id: ownerId } });
         const propertyIds = (await prisma.property.findMany({
             where: {
-                OR: [
-                    { owners: { some: { id: ownerId } } },
-                    { companyId: user.companyId || -1 }
-                ]
+                owners: { some: { id: ownerId } }
             },
             select: { id: true }
         })).map(p => p.id);
@@ -434,7 +473,7 @@ exports.downloadReport = async (req, res) => {
             drawHeader('Monthly Performance Summary', `REPORTING PERIOD: ${monthName} ${queryYear}`);
 
             const properties = await prisma.property.findMany({
-                where: { OR: [{ owners: { some: { id: ownerId } } }, { companyId: user.companyId || -1 }] },
+                where: { owners: { some: { id: ownerId } } },
                 include: { units: true }
             });
             const propIds = properties.map(p => p.id);
@@ -492,7 +531,7 @@ exports.downloadReport = async (req, res) => {
 
         } else if (type === 'annual_overview') {
             const properties = await prisma.property.findMany({
-                where: { OR: [{ owners: { some: { id: ownerId } } }, { companyId: user.companyId || -1 }] },
+                where: { owners: { some: { id: ownerId } } },
                 include: { units: true }
             });
             const propIds = properties.map(p => p.id);
@@ -532,7 +571,7 @@ exports.downloadReport = async (req, res) => {
 
         } else if (type === 'occupancy_stats') {
             const propertiesWithLeases = await prisma.property.findMany({
-                where: { OR: [{ owners: { some: { id: ownerId } } }, { companyId: user.companyId || -1 }] },
+                where: { owners: { some: { id: ownerId } } },
                 include: { units: { include: { leases: { where: { status: 'Active' } } } } }
             });
 
